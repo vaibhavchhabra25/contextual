@@ -14,6 +14,7 @@ from harness.interface import CompressionStrategy, Task
 from harness.models import EvalResult
 from harness.runner import run_once
 from harness.tokenizer import annotate, count_turns
+from engine.strategy import VersionedContextEngine
 from strategies.naive_truncation import NaiveTruncation
 from strategies.rolling_summarization import RollingSummarization
 from strategies.semantic_retrieval import SemanticRetrieval
@@ -84,6 +85,7 @@ def main() -> None:
         NaiveTruncation(),
         RollingSummarization(keep_last=10),
         SemanticRetrieval(keep_last=3),
+        VersionedContextEngine(recency_window=8),
     ]
 
     tasks: list[Task] = [
