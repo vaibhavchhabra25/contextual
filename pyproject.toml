@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-compression"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.30",
+    "tiktoken>=0.7",
+    "numpy>=1.26",
+    "rich>=13",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*", "strategies*", "tasks*", "engine*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
