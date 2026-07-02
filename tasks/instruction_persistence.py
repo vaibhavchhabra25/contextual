@@ -66,6 +66,9 @@ _SCENARIOS = [
 ]
 
 
+num_scenarios = len(_SCENARIOS)
+
+
 class InstructionPersistence(Task):
     """Plant an instruction constraint early; verify it survives compression."""
 

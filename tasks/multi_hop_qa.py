@@ -60,6 +60,9 @@ _FILLER_TEMPLATES = [
 ]
 
 
+num_scenarios = len(_HOP_SCENARIOS)
+
+
 class MultiHopQA(Task):
     """Plant two chained facts at separated turn indices in filler context."""
 

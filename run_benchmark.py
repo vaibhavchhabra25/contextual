@@ -28,82 +28,103 @@ from strategies.naive_truncation import NaiveTruncation
 from strategies.rolling_summarization import RollingSummarization
 from strategies.semantic_retrieval import SemanticRetrieval
 from tasks.agentic_session_replay import AgenticSessionReplay
+from tasks.agentic_session_replay import num_scenarios as _asr_n
 from tasks.instruction_persistence import InstructionPersistence
+from tasks.instruction_persistence import num_scenarios as _ip_n
 from tasks.multi_hop_qa import MultiHopQA
+from tasks.multi_hop_qa import num_scenarios as _mhq_n
 from tasks.needle_in_haystack import NeedleInHaystack
+from tasks.needle_in_haystack import num_scenarios as _nih_n
 
 console = Console()
 
 
 def run_task(
-    task: Task,
+    task_id: str,
+    scenarios: list[Task],
     strategies: list[CompressionStrategy],
     seeds: int = 1,
 ) -> list[EvalResult]:
-    """Run all strategies × budgets for one task. Returns flat list of EvalResults."""
-    original_tokens = count_turns(annotate(task.build_context()))
+    """Run all scenarios × strategies × budgets for one task type.
+
+    Scores are averaged across scenarios (and seeds) before printing.
+    Returns flat list of averaged EvalResults.
+    """
     budget_fractions = [1.0, 0.75, 0.5, 0.25]
-    budgets = [max(50, int(original_tokens * f)) for f in budget_fractions]
 
-    console.print(f"\n[bold yellow]══ Task: {task.id} ══[/bold yellow]")
-    console.print(f"Original context: {original_tokens} tokens")
+    console.print(f"\n[bold yellow]══ Task: {task_id} ({len(scenarios)} scenario(s)) ══[/bold yellow]")
 
-    if hasattr(task, "_secret"):
-        console.print(f"Needle at turn {task.needle_turn}  |  Secret: {task._secret}")
-    if hasattr(task, "_hop_a"):
-        console.print(f"Hop A (turn {task.hop_a_turn}): {task._hop_a}")
-        console.print(f"Hop B (turn {task.hop_b_turn}): {task._hop_b}")
-        console.print(f"Query: {task._query}  |  Answer: {task._answer}")
-    if hasattr(task, "_instruction"):
-        console.print(f"Instruction at turn {task.instruction_turn}: {task._instruction[:80]}…")
-        console.print(f"Constraint check: {task._check_desc}")
+    # key: (strategy_id, budget_fraction_index) → flat list of scores from all scenarios × seeds
+    accumulated: dict[tuple[str, int], list[float]] = {}
+    representative: dict[tuple[str, int], EvalResult] = {}
 
+    for sc_idx, task in enumerate(scenarios):
+        original_tokens = count_turns(annotate(task.build_context()))
+        budgets = [max(50, int(original_tokens * f)) for f in budget_fractions]
+        console.print(f"\n  [dim]Scenario {sc_idx}: {original_tokens} tok[/dim]")
+
+        if hasattr(task, "_secret"):
+            console.print(f"    Needle @ turn {task.needle_turn}  |  Secret: {task._secret}")
+        if hasattr(task, "_hop_a"):
+            console.print(f"    Hop A (t{task.hop_a_turn}): {task._hop_a}")
+            console.print(f"    Hop B (t{task.hop_b_turn}): {task._hop_b}")
+            console.print(f"    Answer: {task._answer}")
+        if hasattr(task, "_instruction"):
+            console.print(f"    Instruction @ turn {task.instruction_turn}: {task._instruction[:60]}…")
+
+        for strategy in strategies:
+            if isinstance(strategy, SemanticRetrieval):
+                strategy.query_hint = task.query()
+            console.print(f"    [cyan]{strategy.id}[/cyan]")
+            for fi, (budget, frac) in enumerate(zip(budgets, budget_fractions)):
+                key = (strategy.id, fi)
+                if key not in accumulated:
+                    accumulated[key] = []
+                for seed in range(seeds):
+                    r = run_once(task, strategy, budget, verbose=(seed == 0 and sc_idx == 0))
+                    accumulated[key].append(r.score)
+                    if key not in representative:
+                        representative[key] = r
+
+    # Build averaged EvalResults
     all_results: list[EvalResult] = []
-
-    # Accumulate scores across seeds then average
-    # key: (strategy_id, budget) → list of EvalResult (one per seed)
-    seed_results: dict[tuple[str, int], list[EvalResult]] = {}
-
-    for strategy in strategies:
-        console.print(f"\n  [cyan]{strategy.id}[/cyan]")
-        for budget in budgets:
-            key = (strategy.id, budget)
-            seed_results[key] = []
-            for seed in range(seeds):
-                r = run_once(task, strategy, budget, verbose=(seed == 0))
-                seed_results[key].append(r)
-
-    # Average across seeds and build final results
     final: dict[str, list[EvalResult]] = {s.id: [] for s in strategies}
+    n_scenarios = len(scenarios)
+
     for strategy in strategies:
-        for budget, frac in zip(budgets, budget_fractions):
-            key = (strategy.id, budget)
-            runs = seed_results[key]
-            avg_score = statistics.mean(r.score for r in runs)
-            representative = runs[0]
+        for fi, frac in enumerate(budget_fractions):
+            key = (strategy.id, fi)
+            scores = accumulated[key]
+            rep = representative[key]
+            avg_score = statistics.mean(scores)
+            label_suffix = ""
+            if n_scenarios > 1:
+                label_suffix += f"_sc{n_scenarios}"
+            if seeds > 1:
+                label_suffix += f"_avg{seeds}"
             averaged = EvalResult(
-                task_id=representative.task_id,
-                strategy_id=representative.strategy_id,
-                token_budget=budget,
-                tokens_original=representative.tokens_original,
-                tokens_after_compression=representative.tokens_after_compression,
+                task_id=task_id,
+                strategy_id=strategy.id,
+                token_budget=rep.token_budget,
+                tokens_original=rep.tokens_original,
+                tokens_after_compression=rep.tokens_after_compression,
                 score=avg_score,
-                score_label=representative.score_label + (f"_avg{seeds}" if seeds > 1 else ""),
-                turn_token_log=representative.turn_token_log,
-                notes=f"seeds={seeds}",
+                score_label=rep.score_label + label_suffix,
+                turn_token_log=rep.turn_token_log,
+                notes=f"scenarios={n_scenarios} seeds={seeds}",
             )
             final[strategy.id].append(averaged)
             all_results.append(averaged)
 
     # Print comparison table
-    table = Table(title=f"Results — {task.id}")
+    table = Table(title=f"Results — {task_id}")
     table.add_column("Budget %", justify="right")
     table.add_column("Budget (tok)", justify="right")
     for s in strategies:
         table.add_column(s.id, justify="center")
 
-    for i, (budget, frac) in enumerate(zip(budgets, budget_fractions)):
-        row = [f"{frac:.0%}", str(budget)]
+    for i, frac in enumerate(budget_fractions):
+        row = [f"{frac:.0%}", str(final[strategies[0].id][i].token_budget)]
         for s in strategies:
             r = final[s.id][i]
             icon = "✓" if r.score == 1.0 else ("~" if r.score > 0 else "✗")
@@ -117,7 +138,7 @@ def run_task(
     for s in strategies:
         for r, frac in zip(final[s.id], budget_fractions):
             if r.score < 1.0:
-                console.print(f"  {s.id}: fails at {frac:.0%}")
+                console.print(f"  {s.id}: fails at {frac:.0%} (score={r.score:.2f})")
                 break
         else:
             console.print(f"  {s.id}: [green]never fails[/green]")
@@ -139,19 +160,29 @@ def main() -> None:
         VersionedContextEngine(recency_window=8),
     ]
 
-    tasks: list[Task] = [
-        NeedleInHaystack(total_turns=40, needle_turn=10),
-        MultiHopQA(total_turns=40, hop_a_turn=8, hop_b_turn=28),
-        AgenticSessionReplay(),
-        InstructionPersistence(total_turns=40, instruction_turn=2),
+    # Each task type is run across all its scenarios; scores are averaged.
+    task_groups: list[tuple[str, list[Task]]] = [
+        (
+            "needle_in_haystack",
+            [NeedleInHaystack(total_turns=40, scenario_index=i) for i in range(_nih_n)],
+        ),
+        (
+            "multi_hop_qa",
+            [MultiHopQA(total_turns=40, hop_a_turn=8, hop_b_turn=28, scenario_index=i) for i in range(_mhq_n)],
+        ),
+        (
+            "agentic_session_replay",
+            [AgenticSessionReplay(scenario_index=i) for i in range(_asr_n)],
+        ),
+        (
+            "instruction_persistence",
+            [InstructionPersistence(total_turns=40, instruction_turn=2, scenario_index=i) for i in range(_ip_n)],
+        ),
     ]
 
     all_results: list[EvalResult] = []
-    for task in tasks:
-        for s in strategies:
-            if isinstance(s, SemanticRetrieval):
-                s.query_hint = task.query()
-        all_results.extend(run_task(task, strategies, seeds=opts.seeds))
+    for task_id, scenarios in task_groups:
+        all_results.extend(run_task(task_id, scenarios, strategies, seeds=opts.seeds))
 
     if opts.json:
         out = Path(opts.json)
