@@ -128,10 +128,12 @@ pip install anthropic tiktoken numpy rich pydantic sentence-transformers groq
 
 ```bash
 export GROQ_API_KEY=your_key_here
-python run_benchmark.py                          # print tables only
-python run_benchmark.py --json results/run.json  # also save JSON
-python run_benchmark.py --json results/run.json --plot  # save JSON + generate charts
-python run_benchmark.py --seeds 3               # average scores over 3 seeds
+python run_benchmark.py                                      # all tasks, print tables only
+python run_benchmark.py --json results/run.json              # also save JSON
+python run_benchmark.py --json results/run.json --plot       # save JSON + generate charts
+python run_benchmark.py --seeds 3                            # average scores over 3 seeds
+python run_benchmark.py --task needle_in_haystack            # run one task only (~48 LLM calls)
+python run_benchmark.py --task needle_in_haystack --task multi_hop_qa  # run two tasks
 ```
 
 The first run downloads the `all-MiniLM-L6-v2` embedding model (~80 MB) — subsequent runs use the cached version.
@@ -156,7 +158,7 @@ Produces one chart per task (accuracy vs. compression ratio, one curve per strat
 ```bash
 # Show the per-turn segment log for a task
 python ctx.py log --task needle_in_haystack
-python ctx.py log --task instruction_persistence
+python ctx.py log --task needle_in_haystack --scenario 1  # inspect scenario 1
 
 # Show what changed between two turns (added / removed / superseded segments)
 python ctx.py diff 0 20 --task agentic_session_replay
@@ -166,6 +168,7 @@ python ctx.py checkout 10 --task needle_in_haystack
 ```
 
 Available tasks: `needle_in_haystack`, `multi_hop_qa`, `agentic_session_replay`, `instruction_persistence`.
+Each task has 3 scenarios (0–2), selectable with `--scenario N`.
 
 ---
 
