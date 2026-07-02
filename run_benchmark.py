@@ -147,10 +147,15 @@ def run_task(
 
 
 def main() -> None:
+    _TASK_NAMES = ["needle_in_haystack", "multi_hop_qa", "agentic_session_replay", "instruction_persistence"]
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", metavar="PATH", help="Save results to JSON file")
     parser.add_argument("--seeds", type=int, default=1, help="Number of seeds to average over")
     parser.add_argument("--plot", action="store_true", help="Generate charts after saving JSON")
+    parser.add_argument(
+        "--task", metavar="NAME", action="append", dest="tasks",
+        choices=_TASK_NAMES, help=f"Run only this task (repeatable). Choices: {_TASK_NAMES}",
+    )
     opts = parser.parse_args()
 
     strategies: list[CompressionStrategy] = [
@@ -180,8 +185,12 @@ def main() -> None:
         ),
     ]
 
+    filter_tasks = set(opts.tasks) if opts.tasks else None
+
     all_results: list[EvalResult] = []
     for task_id, scenarios in task_groups:
+        if filter_tasks and task_id not in filter_tasks:
+            continue
         all_results.extend(run_task(task_id, scenarios, strategies, seeds=opts.seeds))
 
     if opts.json:

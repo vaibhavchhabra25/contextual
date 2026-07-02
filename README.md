@@ -87,23 +87,25 @@ Each task stresses a different failure mode of compression:
 
 ## Benchmark Results (observed)
 
-Entries show the **first budget level where each strategy's score drops below 1.0** (lower % = more resilient to compression). Results confirmed on `llama-3.3-70b-versatile` via Groq.
+Entries show the **first budget level where each strategy's average score drops below 1.0** (lower % = more resilient to compression). Each cell is averaged across **3 scenarios per task type** to reduce per-scenario variance. Results on `llama-3.1-8b-instant` via Groq.
 
 | Task | naive | rolling | semantic | **versioned** |
 |---|---|---|---|---|
-| Needle in haystack | 75% | 25% | **never** | 25% |
-| Multi-hop QA | 25% | 50% | **never** | 75% |
-| Agentic session replay | 25% | 50% | **never** | 75% |
-| Instruction persistence | 75% | 50% | 75% | **never** |
+| Needle in haystack | 75% | 50% | **never** | 25% |
+| Multi-hop QA | 75% | 75% | **never** | 75% |
+| Agentic session replay | 25% | 75% | 25% | **never** |
+| Instruction persistence | 100%† | 100%† | 100%† | 100%† |
+
+† All strategies fail even at full budget on instruction persistence — the 8B model inconsistently obeys format constraints regardless of whether the instruction survives compression. This is a model capability issue, not a compression issue; results would differ on a larger model.
 
 **Key findings:**
 
 - **No single strategy dominates.** Each strategy has a task type where it outperforms the others — the right choice depends on what's in the conversation.
-- **Semantic retrieval wins on fact retrieval** (needle, multi-hop). Query-aware embedding selection is hard to beat when the query vocabulary overlaps with the fact's wording.
-- **Versioned engine wins on instruction persistence.** The `type:rule` GC exemption means behavioral constraints are never evicted regardless of budget. Every other strategy drops the instruction turn at ≤75% and the model ignores the rule.
+- **Semantic retrieval wins on fact retrieval** (needle, multi-hop — never fails). Query-aware embedding selection is hard to beat when the query vocabulary overlaps with the fact's wording.
+- **Versioned engine wins on agentic session replay** (never fails). The `tool:edit` GC exemption keeps the key fix turn verbatim regardless of budget; every other strategy eventually drops it and the model regenerates the old buggy code.
 - **Rolling summarization hallucinates specific values.** It correctly preserves that "a code was mentioned" but substitutes a made-up value when the summary gets squeezed — a subtle and dangerous failure mode.
-- **Agentic session replay favours recency-aware strategies.** The key edit turn is in the recent half of a short session, so naive truncation and semantic retrieval both keep it. Rolling summarization compresses it away and the model regenerates the old buggy implementation.
-- **Versioned engine's weakness is multi-hop.** Both hop turns are tagged `type:fact` and treated symmetrically — the engine doesn't know they need each other. A future improvement: detect entity co-reference across segments and group them as a unit.
+- **Naive truncation is unreliable across the board.** It fails on 3 of 4 tasks by 75% budget, and has no mechanism to prioritise any turn over another.
+- **Multi-hop QA is the hardest task for compression.** Naive, rolling, and versioned all fail by 75% budget; only semantic retrieval (which scores both hop turns highly via embedding similarity to the query) never fails.
 
 ---
 
@@ -223,5 +225,5 @@ class MyTask(Task):
 - [x] **Accuracy-vs-token-budget curve plots** — `plot_results.py` generates per-task and overview charts from saved JSON
 - [x] **JSON result export** — `--json results/run.json` saves all EvalResults for reproducibility
 - [x] **Multi-seed averaging** — `--seeds N` reruns each cell N times and averages scores
+- [x] **More task scenarios** — 3 scenarios per task type; benchmark averages scores across all scenarios
 - [ ] **Anthropic API backend** — configurable provider alongside Groq
-- [ ] **More task scenarios** — multiple scenarios per task type to reduce per-scenario variance
