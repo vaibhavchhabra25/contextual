@@ -62,6 +62,14 @@ Splits history into *old* and *recent* turns. Calls an LLM to summarize all old 
 ### 3. Semantic Retrieval (`semantic_retrieval`)
 Embeds every turn with `sentence-transformers` (`all-MiniLM-L6-v2`, runs locally). At query time, scores all turns by cosine similarity to the task query and greedily keeps the highest-scoring turns that fit in budget. Excellent for single-fact retrieval; blind to multi-hop chains where neither hop individually looks relevant.
 
+### 4. Versioned Context Engine (`versioned_engine`)
+Treats context as a structured, versioned object rather than an append-only log. Each turn is ingested as a `ContextSegment` with embeddings, tags (`type:rule`, `type:fact`, `file:`, `tool:`), and a reference count. On compression, a three-tier GC policy classifies segments:
+- **Keep verbatim** — segments tagged `type:rule` or `type:fact`, or referenced recently
+- **Summarize** — active but stale segments, or superseded but previously referenced segments
+- **Drop** — superseded segments that were never referenced again
+
+All summarize-tier segments are batched into a single LLM call to minimise API usage. The engine also records a per-turn snapshot of the segment store, enabling the history inspection CLI (`ctx log / diff / checkout`).
+
 ---
 
 ## Tasks
@@ -79,20 +87,23 @@ Each task stresses a different failure mode of compression:
 
 ## Benchmark Results (observed)
 
-Entries show the first budget level where each strategy's score drops below 1.0:
+Entries show the **first budget level where each strategy's score drops below 1.0** (lower % = more resilient to compression). Results confirmed on `llama-3.3-70b-versatile` via Groq.
 
-| Task | naive_truncation | rolling_summarization | semantic_retrieval |
-|---|---|---|---|
-| Needle in haystack | **75%** | 25% | never fails |
-| Multi-hop QA | **25%** | 50% | never fails |
-| Agentic session replay | **25%** | 75% | 25% |
-| Instruction persistence | **75%** | 50% | 75% |
+| Task | naive | rolling | semantic | **versioned** |
+|---|---|---|---|---|
+| Needle in haystack | 75% | 25% | **never** | 25% |
+| Multi-hop QA | 25% | 50% | **never** | 75% |
+| Agentic session replay | 25% | 50% | **never** | 75% |
+| Instruction persistence | 75% | 50% | 75% | **never** |
 
 **Key findings:**
-- No single strategy dominates across all task types.
-- Semantic retrieval is best for fact-retrieval tasks but fails at the same rate as naive truncation on instruction persistence (behavioral rules don't embed close to the downstream query).
-- Rolling summarization is the most consistent mid-budget performer but hallucinates specific values (IDs, codes) when the summary gets squeezed.
-- Agentic session replay is the only task where naive truncation outperforms rolling summarization — the key fix is near the recent end of a short session, so truncation keeps it while summarization compresses it away.
+
+- **No single strategy dominates.** Each strategy has a task type where it outperforms the others — the right choice depends on what's in the conversation.
+- **Semantic retrieval wins on fact retrieval** (needle, multi-hop). Query-aware embedding selection is hard to beat when the query vocabulary overlaps with the fact's wording.
+- **Versioned engine wins on instruction persistence.** The `type:rule` GC exemption means behavioral constraints are never evicted regardless of budget. Every other strategy drops the instruction turn at ≤75% and the model ignores the rule.
+- **Rolling summarization hallucinates specific values.** It correctly preserves that "a code was mentioned" but substitutes a made-up value when the summary gets squeezed — a subtle and dangerous failure mode.
+- **Agentic session replay favours recency-aware strategies.** The key edit turn is in the recent half of a short session, so naive truncation and semantic retrieval both keep it. Rolling summarization compresses it away and the model regenerates the old buggy implementation.
+- **Versioned engine's weakness is multi-hop.** Both hop turns are tagged `type:fact` and treated symmetrically — the engine doesn't know they need each other. A future improvement: detect entity co-reference across segments and group them as a unit.
 
 ---
 
@@ -119,6 +130,28 @@ python run_benchmark.py
 ```
 
 The first run downloads the `all-MiniLM-L6-v2` embedding model (~80 MB) — subsequent runs use the cached version.
+
+By default the benchmark uses `llama-3.3-70b-versatile`. To use a different Groq model (e.g. to avoid daily token limits on the free tier):
+
+```bash
+GROQ_MODEL=llama-3.1-8b-instant python run_benchmark.py
+```
+
+### Inspect context history (versioned engine CLI)
+
+```bash
+# Show the per-turn segment log for a task
+python ctx.py log --task needle_in_haystack
+python ctx.py log --task instruction_persistence
+
+# Show what changed between two turns (added / removed / superseded segments)
+python ctx.py diff 0 20 --task agentic_session_replay
+
+# Rehydrate the exact context as it existed at a given turn
+python ctx.py checkout 10 --task needle_in_haystack
+```
+
+Available tasks: `needle_in_haystack`, `multi_hop_qa`, `agentic_session_replay`, `instruction_persistence`.
 
 ---
 
@@ -164,35 +197,18 @@ class MyTask(Task):
 
 ## Roadmap
 
-### Part 2 — Versioned Context Engine
+### Completed
+- [x] Benchmark harness with `CompressionStrategy` / `Task` interfaces
+- [x] 3 baseline strategies: naive truncation, rolling summarization, semantic retrieval
+- [x] 4 task types: needle in haystack, multi-hop QA, agentic session replay, instruction persistence
+- [x] Versioned context engine with supersession detection, three-tier GC, and `type:rule` exemption
+- [x] History inspection CLI: `ctx log / diff / checkout`
+- [x] Configurable model via `GROQ_MODEL` env var with exponential-backoff retry
 
-The planned next strategy treats context as a structured, versioned object rather than an append-only log — analogous to how git tracks file history.
-
-**Data model:**
-```python
-ContextSegment {
-    id, content, embedding, created_turn,
-    supersedes: [id, ...],   # what this segment replaces
-    tags: [file:main.py, tool:edit, fact:user_prefs],
-    last_referenced_turn, reference_count
-}
-```
-
-**Core mechanics:**
-- **Supersession detection** — when a file is re-read after an edit, the old file-content segment is marked superseded rather than left to linger.
-- **Fine-grained GC policy** — superseded + never referenced → drop; referenced but stale → summarize; active / high-relevance → keep verbatim.
-- **History inspection CLI:**
-  ```
-  ctx log                   # history of context states over turns
-  ctx diff turn12 turn18    # what was added/removed/superseded between two turns
-  ctx checkout turn12       # rehydrate the exact context at a given turn
-  ```
-
-**Why this matters:** instruction persistence and agentic session replay both fail because strategies can't distinguish "this turn is a persistent rule" from "this turn is throwaway filler." The versioned engine tags segments by type and applies type-aware GC, so behavioral constraints are never evicted.
-
-### Other planned work
-- [ ] Accuracy-vs-token-budget curve plots (matplotlib)
-- [ ] JSON result export for reproducibility
-- [ ] Multi-seed averaging to reduce variance in scores
-- [ ] Support for Anthropic API alongside Groq (configurable backend)
-- [ ] More task scenarios per task type (currently 1 scenario per type)
+### Next
+- [ ] **Multi-hop co-reference grouping** — detect when two `type:fact` segments share an entity and group them as a unit so the GC never separates a hop chain
+- [ ] **`tool:edit` GC exemption** — tag edit turns as high-value so the agentic session replay fix turn is never compressed away
+- [ ] **Accuracy-vs-token-budget curve plots** — matplotlib charts of score vs. compression ratio per strategy, the core research visualisation
+- [ ] **JSON result export** — structured output for reproducibility and downstream analysis
+- [ ] **Multi-seed averaging** — run each (strategy × task × budget) cell N times and report mean ± std to reduce model variance
+- [ ] **Anthropic API backend** — configurable provider alongside Groq

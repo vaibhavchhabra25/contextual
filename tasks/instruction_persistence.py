@@ -80,6 +80,7 @@ class InstructionPersistence(Task):
     ) -> None:
         self.total_turns = total_turns
         self.instruction_turn = instruction_turn
+        self._seed = seed
         self._rng = random.Random(seed)
         scenario = _SCENARIOS[scenario_index % len(_SCENARIOS)]
         self._instruction = scenario["instruction"]
@@ -88,6 +89,7 @@ class InstructionPersistence(Task):
         self._check_desc = scenario["check_desc"]
 
     def build_context(self) -> list[Turn]:
+        self._rng = random.Random(self._seed)  # reset so every call is identical
         filler = list(self._rng.sample(_FILLER_QA, len(_FILLER_QA)))
         filler_idx = 0
         turns: list[Turn] = []

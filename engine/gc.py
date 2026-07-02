@@ -18,7 +18,7 @@ from harness.models import Turn
 from harness.tokenizer import count
 
 _client = Groq(api_key=os.environ["GROQ_API_KEY"])
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 _SUMMARIZE_PROMPT = (
     "Summarize the following conversation segments. For each segment, output "

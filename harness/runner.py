@@ -12,7 +12,7 @@ from harness.tokenizer import annotate, count_turns
 
 _client = Groq(api_key=os.environ["GROQ_API_KEY"])
 # llama-3.3-70b is fast, cheap, and available on Groq's free tier
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 def run_once(
@@ -77,9 +77,20 @@ def _build_messages(history: list[Turn], query: str) -> list[dict]:
 
 
 def _call_model(messages: list[dict]) -> str:
-    resp = _client.chat.completions.create(
-        model=_MODEL,
-        max_tokens=512,
-        messages=messages,
-    )
-    return resp.choices[0].message.content
+    import time
+    for attempt in range(5):
+        try:
+            resp = _client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=512,
+                messages=messages,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e):
+                wait = 2 ** attempt * 15  # 15s, 30s, 60s, 120s, 240s
+                print(f"  [runner] rate limit — waiting {wait}s (attempt {attempt+1}/5)")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("Rate limit persisted after 5 retries")

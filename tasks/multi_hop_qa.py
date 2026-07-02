@@ -76,11 +76,13 @@ class MultiHopQA(Task):
         self.total_turns = total_turns
         self.hop_a_turn = hop_a_turn
         self.hop_b_turn = hop_b_turn
+        self._seed = seed
         self._rng = random.Random(seed)
         scenario = _HOP_SCENARIOS[scenario_index % len(_HOP_SCENARIOS)]
         self._hop_a, self._hop_b, self._query, self._answer = scenario
 
     def build_context(self) -> list[Turn]:
+        self._rng = random.Random(self._seed)  # reset so every call is identical
         fillers = list(self._rng.sample(_FILLER_TEMPLATES, len(_FILLER_TEMPLATES)))
         filler_idx = 0
         turns: list[Turn] = []

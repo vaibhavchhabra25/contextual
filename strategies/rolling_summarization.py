@@ -16,7 +16,7 @@ from harness.models import Turn
 from harness.tokenizer import count, count_turns
 
 _client = Groq(api_key=os.environ["GROQ_API_KEY"])
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 _SUMMARY_PROMPT = (
     "You are a context compressor. Summarize the following conversation turns "
