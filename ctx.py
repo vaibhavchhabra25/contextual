@@ -26,22 +26,37 @@ from engine.cli import cmd_checkout, cmd_diff, cmd_log
 from engine.strategy import VersionedContextEngine
 from harness.tokenizer import annotate, count_turns
 from tasks.agentic_session_replay import AgenticSessionReplay
+from tasks.agentic_session_replay import num_scenarios as _asr_n
 from tasks.instruction_persistence import InstructionPersistence
+from tasks.instruction_persistence import num_scenarios as _ip_n
 from tasks.multi_hop_qa import MultiHopQA
+from tasks.multi_hop_qa import num_scenarios as _mhq_n
 from tasks.needle_in_haystack import NeedleInHaystack
+from tasks.needle_in_haystack import num_scenarios as _nih_n
 
 console = Console()
 
-_TASKS = {
-    "needle_in_haystack": NeedleInHaystack(total_turns=40, needle_turn=10),
-    "multi_hop_qa": MultiHopQA(total_turns=40, hop_a_turn=8, hop_b_turn=28),
-    "agentic_session_replay": AgenticSessionReplay(),
-    "instruction_persistence": InstructionPersistence(total_turns=40, instruction_turn=2),
+_TASK_NAMES = ["needle_in_haystack", "multi_hop_qa", "agentic_session_replay", "instruction_persistence"]
+_NUM_SCENARIOS = {
+    "needle_in_haystack": _nih_n,
+    "multi_hop_qa": _mhq_n,
+    "agentic_session_replay": _asr_n,
+    "instruction_persistence": _ip_n,
 }
 
 
-def _build_engine(task_name: str) -> VersionedContextEngine:
-    task = _TASKS[task_name]
+def _make_task(task_name: str, scenario: int):
+    if task_name == "needle_in_haystack":
+        return NeedleInHaystack(total_turns=40, scenario_index=scenario)
+    if task_name == "multi_hop_qa":
+        return MultiHopQA(total_turns=40, hop_a_turn=8, hop_b_turn=28, scenario_index=scenario)
+    if task_name == "agentic_session_replay":
+        return AgenticSessionReplay(scenario_index=scenario)
+    return InstructionPersistence(total_turns=40, instruction_turn=2, scenario_index=scenario)
+
+
+def _build_engine(task_name: str, scenario: int) -> VersionedContextEngine:
+    task = _make_task(task_name, scenario)
     history = annotate(task.build_context())
     total_tokens = count_turns(history)
 
@@ -50,7 +65,7 @@ def _build_engine(task_name: str) -> VersionedContextEngine:
     engine.compress(history, budget=total_tokens)
 
     console.print(
-        f"[dim]Loaded task [bold]{task_name}[/bold] — "
+        f"[dim]Loaded task [bold]{task_name}[/bold] scenario {scenario} — "
         f"{len(history)} turns, {total_tokens} tokens[/dim]\n"
     )
     return engine
@@ -63,12 +78,23 @@ def main() -> None:
     parser.add_argument(
         "--task",
         default="needle_in_haystack",
-        choices=list(_TASKS.keys()),
+        choices=_TASK_NAMES,
         help="Which task to load (default: needle_in_haystack)",
+    )
+    parser.add_argument(
+        "--scenario",
+        type=int,
+        default=0,
+        help="Scenario index within the task (default: 0)",
     )
     opts = parser.parse_args()
 
-    engine = _build_engine(opts.task)
+    n = _NUM_SCENARIOS[opts.task]
+    if opts.scenario >= n:
+        console.print(f"[red]--scenario {opts.scenario} out of range; {opts.task} has {n} scenario(s) (0–{n-1})[/red]")
+        sys.exit(1)
+
+    engine = _build_engine(opts.task, opts.scenario)
     store = engine.store
 
     if opts.command == "log":
