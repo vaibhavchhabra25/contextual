@@ -32,7 +32,15 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 _FILE_RE = re.compile(r"(?:path|file)=(\S+)|`([^`]+\.\w+)`")
 _TOOL_RE = re.compile(r"tool:(\w+)")
 _RULE_MARKERS = ("system rule", "important:", "[confirmed]", "must ", "never ", "always ")
-_FACT_MARKERS = ("secret code", "remember this", "employee", "badge", "password", "id is")
+_FACT_MARKERS = (
+    "secret code", "remember this", "employee", "badge", "password", "id is",
+    "number is", "code is", "key is", "token is",  # "X's Y is Z" patterns
+    "lead engineer", "project manager", "director", "located at", "extension is",
+)
+# Regex for "X is Y" where X contains a proper noun — catches hop-A style facts
+_NAMED_FACT_RE = re.compile(
+    r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+is\b", re.MULTILINE
+)
 
 
 def _extract_tags(content: str) -> list[str]:
@@ -49,7 +57,7 @@ def _extract_tags(content: str) -> list[str]:
     if any(marker in lower for marker in _RULE_MARKERS):
         tags.append("type:rule")
 
-    if any(marker in lower for marker in _FACT_MARKERS):
+    if any(marker in lower for marker in _FACT_MARKERS) or _NAMED_FACT_RE.search(content):
         tags.append("type:fact")
 
     return list(dict.fromkeys(tags))  # dedup, preserve order

@@ -191,8 +191,16 @@ def apply_gc(
     to_summarize = [seg for seg in segments if tiers[seg.id] == GCTier.SUMMARIZE]
     summaries = _summarize_batch(to_summarize) if to_summarize else {}
 
+    # ── Phase 1: reserve budget for KEEP segments ──────────────────────────────
+    # Calculate how many tokens KEEP segments need so we never crowd them out.
+    keep_segs = [seg for seg in segments if tiers[seg.id] == GCTier.KEEP]
+    reserved = sum(seg.token_count for seg in keep_segs)
+    summarize_budget = max(0, budget - reserved)
+
+    # ── Phase 2: build output in turn order ────────────────────────────────────
     turns: list[Turn] = []
-    used_tokens = 0
+    used_keep = 0
+    used_summarize = 0
 
     for seg in segments:
         tier = tiers[seg.id]
@@ -205,7 +213,7 @@ def apply_gc(
             summary_text = summaries.get(seg.id, seg.content[:80])
             content = f"[Summary turn {seg.created_turn}]: {summary_text}"
             tok = count(content)
-            if used_tokens + tok > budget:
+            if used_summarize + tok > summarize_budget:
                 seg.status = SegmentStatus.DROPPED
                 continue
             seg.status = SegmentStatus.SUMMARIZED
@@ -216,16 +224,16 @@ def apply_gc(
                 token_count=tok,
                 metadata={"gc": "summarized", "original_id": seg.id},
             ))
-            used_tokens += tok
+            used_summarize += tok
             continue
 
-        # KEEP
-        if used_tokens + seg.token_count > budget:
-            # Over budget even for a keep-tier segment — summarize as fallback
+        # KEEP — budget is reserved so this should always fit
+        if used_keep + seg.token_count > reserved:
+            # Shouldn't happen, but summarize as safety fallback
             summary_text = _summarize_segment(seg)
             content = f"[Summary turn {seg.created_turn}]: {summary_text}"
             tok = count(content)
-            if used_tokens + tok > budget:
+            if used_keep + used_summarize + tok > budget:
                 seg.status = SegmentStatus.DROPPED
                 continue
             seg.status = SegmentStatus.SUMMARIZED
@@ -236,7 +244,7 @@ def apply_gc(
                 token_count=tok,
                 metadata={"gc": "summarized_keep_overflow", "original_id": seg.id},
             ))
-            used_tokens += tok
+            used_keep += tok
         else:
             turns.append(Turn(
                 role=seg.role,
@@ -245,6 +253,6 @@ def apply_gc(
                 token_count=seg.token_count,
                 metadata={"gc": "kept", "original_id": seg.id},
             ))
-            used_tokens += seg.token_count
+            used_keep += seg.token_count
 
     return turns
