@@ -126,7 +126,10 @@ pip install anthropic tiktoken numpy rich pydantic sentence-transformers groq
 
 ```bash
 export GROQ_API_KEY=your_key_here
-python run_benchmark.py
+python run_benchmark.py                          # print tables only
+python run_benchmark.py --json results/run.json  # also save JSON
+python run_benchmark.py --json results/run.json --plot  # save JSON + generate charts
+python run_benchmark.py --seeds 3               # average scores over 3 seeds
 ```
 
 The first run downloads the `all-MiniLM-L6-v2` embedding model (~80 MB) — subsequent runs use the cached version.
@@ -134,8 +137,17 @@ The first run downloads the `all-MiniLM-L6-v2` embedding model (~80 MB) — subs
 By default the benchmark uses `llama-3.3-70b-versatile`. To use a different Groq model (e.g. to avoid daily token limits on the free tier):
 
 ```bash
-GROQ_MODEL=llama-3.1-8b-instant python run_benchmark.py
+GROQ_MODEL=llama-3.1-8b-instant python run_benchmark.py --json results/run.json --plot
 ```
+
+### Generate plots from a saved run
+
+```bash
+python plot_results.py results/run.json            # charts in results/charts/
+python plot_results.py results/run.json --out figs/ # custom output dir
+```
+
+Produces one chart per task (accuracy vs. compression ratio, one curve per strategy) plus an `overview.png` with all four tasks as subplots.
 
 ### Inspect context history (versioned engine CLI)
 
@@ -206,9 +218,10 @@ class MyTask(Task):
 - [x] Configurable model via `GROQ_MODEL` env var with exponential-backoff retry
 
 ### Next
-- [ ] **Multi-hop co-reference grouping** — detect when two `type:fact` segments share an entity and group them as a unit so the GC never separates a hop chain
-- [ ] **`tool:edit` GC exemption** — tag edit turns as high-value so the agentic session replay fix turn is never compressed away
-- [ ] **Accuracy-vs-token-budget curve plots** — matplotlib charts of score vs. compression ratio per strategy, the core research visualisation
-- [ ] **JSON result export** — structured output for reproducibility and downstream analysis
-- [ ] **Multi-seed averaging** — run each (strategy × task × budget) cell N times and report mean ± std to reduce model variance
+- [x] **Multi-hop co-reference grouping** — segments sharing a named entity with any KEEP-tier segment are promoted to KEEP, so hop chains are never separated by GC
+- [x] **`tool:edit` GC exemption** — edit turns are tagged high-value and kept verbatim regardless of budget
+- [x] **Accuracy-vs-token-budget curve plots** — `plot_results.py` generates per-task and overview charts from saved JSON
+- [x] **JSON result export** — `--json results/run.json` saves all EvalResults for reproducibility
+- [x] **Multi-seed averaging** — `--seeds N` reruns each cell N times and averages scores
 - [ ] **Anthropic API backend** — configurable provider alongside Groq
+- [ ] **More task scenarios** — multiple scenarios per task type to reduce per-scenario variance

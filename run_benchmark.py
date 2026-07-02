@@ -2,19 +2,28 @@
 """Run the benchmark matrix and print comparison tables per task.
 
 Usage:
-    python run_benchmark.py
+    python run_benchmark.py                        # print tables only
+    python run_benchmark.py --json results/run.json  # also save JSON
+    python run_benchmark.py --seeds 3              # average over 3 seeds
+    python run_benchmark.py --json results/run.json --plot  # save + plot
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import statistics
+from dataclasses import asdict
+from pathlib import Path
+
 from rich.console import Console
 from rich.table import Table
 
+from engine.strategy import VersionedContextEngine
 from harness.interface import CompressionStrategy, Task
 from harness.models import EvalResult
 from harness.runner import run_once
 from harness.tokenizer import annotate, count_turns
-from engine.strategy import VersionedContextEngine
 from strategies.naive_truncation import NaiveTruncation
 from strategies.rolling_summarization import RollingSummarization
 from strategies.semantic_retrieval import SemanticRetrieval
@@ -26,7 +35,12 @@ from tasks.needle_in_haystack import NeedleInHaystack
 console = Console()
 
 
-def run_task(task: Task, strategies: list[CompressionStrategy]) -> None:
+def run_task(
+    task: Task,
+    strategies: list[CompressionStrategy],
+    seeds: int = 1,
+) -> list[EvalResult]:
+    """Run all strategies × budgets for one task. Returns flat list of EvalResults."""
     original_tokens = count_turns(annotate(task.build_context()))
     budget_fractions = [1.0, 0.75, 0.5, 0.25]
     budgets = [max(50, int(original_tokens * f)) for f in budget_fractions]
@@ -34,7 +48,6 @@ def run_task(task: Task, strategies: list[CompressionStrategy]) -> None:
     console.print(f"\n[bold yellow]══ Task: {task.id} ══[/bold yellow]")
     console.print(f"Original context: {original_tokens} tokens")
 
-    # Print task-specific info
     if hasattr(task, "_secret"):
         console.print(f"Needle at turn {task.needle_turn}  |  Secret: {task._secret}")
     if hasattr(task, "_hop_a"):
@@ -45,14 +58,44 @@ def run_task(task: Task, strategies: list[CompressionStrategy]) -> None:
         console.print(f"Instruction at turn {task.instruction_turn}: {task._instruction[:80]}…")
         console.print(f"Constraint check: {task._check_desc}")
 
-    results: dict[str, list[EvalResult]] = {s.id: [] for s in strategies}
+    all_results: list[EvalResult] = []
+
+    # Accumulate scores across seeds then average
+    # key: (strategy_id, budget) → list of EvalResult (one per seed)
+    seed_results: dict[tuple[str, int], list[EvalResult]] = {}
+
     for strategy in strategies:
         console.print(f"\n  [cyan]{strategy.id}[/cyan]")
         for budget in budgets:
-            r = run_once(task, strategy, budget, verbose=True)
-            results[strategy.id].append(r)
+            key = (strategy.id, budget)
+            seed_results[key] = []
+            for seed in range(seeds):
+                r = run_once(task, strategy, budget, verbose=(seed == 0))
+                seed_results[key].append(r)
 
-    # Comparison table
+    # Average across seeds and build final results
+    final: dict[str, list[EvalResult]] = {s.id: [] for s in strategies}
+    for strategy in strategies:
+        for budget, frac in zip(budgets, budget_fractions):
+            key = (strategy.id, budget)
+            runs = seed_results[key]
+            avg_score = statistics.mean(r.score for r in runs)
+            representative = runs[0]
+            averaged = EvalResult(
+                task_id=representative.task_id,
+                strategy_id=representative.strategy_id,
+                token_budget=budget,
+                tokens_original=representative.tokens_original,
+                tokens_after_compression=representative.tokens_after_compression,
+                score=avg_score,
+                score_label=representative.score_label + (f"_avg{seeds}" if seeds > 1 else ""),
+                turn_token_log=representative.turn_token_log,
+                notes=f"seeds={seeds}",
+            )
+            final[strategy.id].append(averaged)
+            all_results.append(averaged)
+
+    # Print comparison table
     table = Table(title=f"Results — {task.id}")
     table.add_column("Budget %", justify="right")
     table.add_column("Budget (tok)", justify="right")
@@ -62,8 +105,8 @@ def run_task(task: Task, strategies: list[CompressionStrategy]) -> None:
     for i, (budget, frac) in enumerate(zip(budgets, budget_fractions)):
         row = [f"{frac:.0%}", str(budget)]
         for s in strategies:
-            r = results[s.id][i]
-            icon = "✓" if r.score == 1.0 else "✗"
+            r = final[s.id][i]
+            icon = "✓" if r.score == 1.0 else ("~" if r.score > 0 else "✗")
             row.append(f"{icon} ({r.tokens_after_compression} tok)")
         table.add_row(*row)
 
@@ -72,15 +115,23 @@ def run_task(task: Task, strategies: list[CompressionStrategy]) -> None:
 
     console.print("\n[bold]First failure point:[/bold]")
     for s in strategies:
-        for r, frac in zip(results[s.id], budget_fractions):
+        for r, frac in zip(final[s.id], budget_fractions):
             if r.score < 1.0:
                 console.print(f"  {s.id}: fails at {frac:.0%}")
                 break
         else:
             console.print(f"  {s.id}: [green]never fails[/green]")
 
+    return all_results
+
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", metavar="PATH", help="Save results to JSON file")
+    parser.add_argument("--seeds", type=int, default=1, help="Number of seeds to average over")
+    parser.add_argument("--plot", action="store_true", help="Generate charts after saving JSON")
+    opts = parser.parse_args()
+
     strategies: list[CompressionStrategy] = [
         NaiveTruncation(),
         RollingSummarization(keep_last=10),
@@ -95,12 +146,24 @@ def main() -> None:
         InstructionPersistence(total_turns=40, instruction_turn=2),
     ]
 
+    all_results: list[EvalResult] = []
     for task in tasks:
-        # For semantic retrieval, inject the task's query as the hint
         for s in strategies:
             if isinstance(s, SemanticRetrieval):
                 s.query_hint = task.query()
-        run_task(task, strategies)
+        all_results.extend(run_task(task, strategies, seeds=opts.seeds))
+
+    if opts.json:
+        out = Path(opts.json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as f:
+            json.dump([asdict(r) for r in all_results], f, indent=2)
+        console.print(f"\n[dim]Results saved to {out}[/dim]")
+
+        if opts.plot:
+            from plot_results import plot
+            charts = plot([asdict(r) for r in all_results], out.parent / "charts")
+            console.print(f"[dim]{len(charts)} charts saved[/dim]")
 
 
 if __name__ == "__main__":

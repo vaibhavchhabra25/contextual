@@ -1,7 +1,8 @@
 """GC policy — classify segments and prune to fit a token budget.
 
 Three tiers:
-  KEEP      — active + (recent OR high reference count OR tagged as rule/fact)
+  KEEP      — active + (recent OR high reference count OR tagged as rule/fact/edit
+               OR shares a named entity with another KEEP segment)
   SUMMARIZE — active but stale, or superseded but referenced
   DROP      — superseded + never referenced again
 """
@@ -9,6 +10,7 @@ Three tiers:
 from __future__ import annotations
 
 import os
+import re
 from enum import Enum
 
 from groq import Groq
@@ -16,6 +18,9 @@ from groq import Groq
 from engine.segment import ContextSegment, SegmentStatus
 from harness.models import Turn
 from harness.tokenizer import count
+
+# Match capitalized multi-word proper nouns (e.g. "Marcus Webb", "Project Aurora")
+_ENTITY_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
 
 _client = Groq(api_key=os.environ["GROQ_API_KEY"])
 _MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -41,12 +46,18 @@ class GCTier(str, Enum):
     DROP = "drop"
 
 
+def _entities(seg: ContextSegment) -> set[str]:
+    return set(_ENTITY_RE.findall(seg.content))
+
+
 def _is_high_value(seg: ContextSegment, current_turn: int, recency_window: int) -> bool:
-    """True if a segment should be kept verbatim regardless of status."""
+    """True if a segment should be kept verbatim regardless of co-reference status."""
     if "type:rule" in seg.tags:
         return True
     if "type:fact" in seg.tags and seg.reference_count > 0:
         return True
+    if any(t.startswith("tool:edit") for t in seg.tags):
+        return True  # edit turns carry the key fix in agentic sessions
     if current_turn - seg.last_referenced_turn <= recency_window:
         return True
     if seg.reference_count >= 2:
@@ -54,23 +65,49 @@ def _is_high_value(seg: ContextSegment, current_turn: int, recency_window: int) 
     return False
 
 
+def _compute_tiers(
+    segments: list[ContextSegment],
+    current_turn: int,
+    recency_window: int,
+) -> dict[str, GCTier]:
+    """Classify every segment, then promote segments that share a named entity
+    with any KEEP-tier segment (co-reference grouping for multi-hop chains)."""
+    tiers: dict[str, GCTier] = {}
+
+    for seg in segments:
+        if seg.status in (SegmentStatus.DROPPED, SegmentStatus.SUMMARIZED):
+            tiers[seg.id] = GCTier.DROP
+        elif seg.is_active:
+            tiers[seg.id] = GCTier.KEEP if _is_high_value(seg, current_turn, recency_window) else GCTier.SUMMARIZE
+        else:  # SUPERSEDED
+            tiers[seg.id] = GCTier.SUMMARIZE if seg.reference_count > 0 else GCTier.DROP
+
+    # Entity co-reference pass: any SUMMARIZE segment that shares a named entity
+    # with a KEEP segment gets promoted to KEEP.
+    keep_entities: set[str] = set()
+    for seg in segments:
+        if tiers[seg.id] == GCTier.KEEP:
+            keep_entities |= _entities(seg)
+
+    if keep_entities:
+        for seg in segments:
+            if tiers[seg.id] == GCTier.SUMMARIZE and (_entities(seg) & keep_entities):
+                tiers[seg.id] = GCTier.KEEP
+
+    return tiers
+
+
 def classify(
     seg: ContextSegment,
     current_turn: int,
     recency_window: int = 8,
 ) -> GCTier:
-    if seg.status == SegmentStatus.DROPPED or seg.status == SegmentStatus.SUMMARIZED:
-        return GCTier.DROP  # already handled
-
+    """Single-segment classification (no co-reference). Use _compute_tiers for batches."""
+    if seg.status in (SegmentStatus.DROPPED, SegmentStatus.SUMMARIZED):
+        return GCTier.DROP
     if seg.is_active:
-        if _is_high_value(seg, current_turn, recency_window):
-            return GCTier.KEEP
-        return GCTier.SUMMARIZE  # active but not high-value → compress
-
-    # SUPERSEDED
-    if seg.reference_count > 0:
-        return GCTier.SUMMARIZE  # was referenced at some point — worth a note
-    return GCTier.DROP           # never used after being superseded → discard
+        return GCTier.KEEP if _is_high_value(seg, current_turn, recency_window) else GCTier.SUMMARIZE
+    return GCTier.SUMMARIZE if seg.reference_count > 0 else GCTier.DROP
 
 
 # ── summarization ──────────────────────────────────────────────────────────────
@@ -144,7 +181,7 @@ def apply_gc(
     verbose: bool = False,
 ) -> list[Turn]:
     """Apply GC policy to *segments* and return a list of Turns within *budget*."""
-    tiers = {seg.id: classify(seg, current_turn, recency_window) for seg in segments}
+    tiers = _compute_tiers(segments, current_turn, recency_window)
 
     if verbose:
         counts = {t: sum(1 for v in tiers.values() if v == t) for t in GCTier}
