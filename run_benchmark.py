@@ -24,6 +24,7 @@ from harness.interface import CompressionStrategy, Task
 from harness.models import EvalResult
 from harness.runner import run_once
 from harness.tokenizer import annotate, count_turns
+from strategies.hybrid import HybridStrategy
 from strategies.naive_truncation import NaiveTruncation
 from strategies.rolling_summarization import RollingSummarization
 from strategies.semantic_retrieval import SemanticRetrieval
@@ -73,7 +74,7 @@ def run_task(
             console.print(f"    Instruction @ turn {task.instruction_turn}: {task._instruction[:60]}…")
 
         for strategy in strategies:
-            if isinstance(strategy, SemanticRetrieval):
+            if isinstance(strategy, (SemanticRetrieval, HybridStrategy)):
                 strategy.query_hint = task.query()
             console.print(f"    [cyan]{strategy.id}[/cyan]")
             for fi, (budget, frac) in enumerate(zip(budgets, budget_fractions)):
@@ -163,6 +164,7 @@ def main() -> None:
         RollingSummarization(keep_last=10),
         SemanticRetrieval(keep_last=3),
         VersionedContextEngine(recency_window=8),
+        HybridStrategy(keep_last=3),
     ]
 
     # Each task type is run across all its scenarios; scores are averaged.
